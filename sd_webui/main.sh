@@ -8,7 +8,6 @@ source .env
 # Set up a trap to call the error_exit function on ERR signal
 trap 'error_exit "### ERROR ###"' ERR
 
-
 echo "### Setting up Stable Diffusion WebUI ###"
 log "Setting up Stable Diffusion WebUI"
 if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
@@ -19,7 +18,7 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     UPDATE_REPO_COMMIT=$SD_WEBUI_UPDATE_REPO_COMMIT \
     prepare_repo 
 
-    # git clone extensions that has their own model folder
+    # git clone extensions that have their own model folder
     if [[ ! -d "${REPO_DIR}/extensions/sd-webui-controlnet" ]]; then
         git clone https://github.com/Mikubill/sd-webui-controlnet.git "${REPO_DIR}/extensions/sd-webui-controlnet"
     fi
@@ -39,14 +38,8 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     )
     prepare_link  "${symlinks[@]}"
 
-    #Prepare the controlnet model dir
-    #mkdir -p $MODEL_DIR/controlnet/
-    # cp $LINK_CONTROLNET_TO/*.yaml $MODEL_DIR/controlnet/
     rm -rf $VENV_DIR/sd_webui-env
-    
-    
     python3.10 -m venv $VENV_DIR/sd_webui-env
-    
     source $VENV_DIR/sd_webui-env/bin/activate
 
     pip install pip==24.0
@@ -54,10 +47,29 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     
     # fix install issue with pycairo, which is needed by sd-webui-controlnet
     apt-get install -y libcairo2-dev libjpeg-dev libgif-dev
-    pip uninstall -y torch torchvision torchaudio protobuf lxml
+    
+    # remove any preinstalled versions
+    pip uninstall -y torch torchvision torchaudio protobuf lxml || true
+
+    # Detect CUDA version
+    CUDA_VER=""
+    if command -v nvidia-smi &> /dev/null; then
+        DRIVER_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)
+        echo "NVIDIA driver detected: $DRIVER_VER"
+        if [[ $(python3 -c "import torch; import re; print('cu121' if int(''.join(re.findall(r'[0-9]+', '$DRIVER_VER'))[:3]) >= 525 else 'cu118')") == "cu121" ]]; then
+            CUDA_VER="cu121"
+        else
+            CUDA_VER="cu118"
+        fi
+    else
+        CUDA_VER="cpu"
+        echo "No NVIDIA GPU detected. Installing CPU-only PyTorch."
+    fi
+
+    echo "Installing torch/torchvision/torchaudio for $CUDA_VER ..."
+    pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --extra-index-url https://download.pytorch.org/whl/$CUDA_VER
 
     export PYTHONPATH="$PYTHONPATH:$REPO_DIR"
-    # must run inside webui dir since env['PYTHONPATH'] = os.path.abspath(".") existing in launch.py
     cd $REPO_DIR
     python $current_dir/preinstall.py
     cd $current_dir
@@ -66,12 +78,10 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     
     touch /tmp/sd_webui.prepared
 else
-    
     source $VENV_DIR/sd_webui-env/bin/activate
-    
 fi
-log "Finished Preparing Environment for Stable Diffusion WebUI"
 
+log "Finished Preparing Environment for Stable Diffusion WebUI"
 
 if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
   echo "### Downloading Model for Stable Diffusion WebUI ###"
@@ -82,9 +92,6 @@ else
   log "Skipping Model Download for Stable Diffusion WebUI"
 fi
 
-
-
-
 if [[ -z "$INSTALL_ONLY" ]]; then
   echo "### Starting Stable Diffusion WebUI ###"
   log "Starting Stable Diffusion WebUI"
@@ -93,17 +100,17 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   if [[ -n "${SD_WEBUI_GRADIO_AUTH}" ]]; then
     auth="--gradio-auth ${SD_WEBUI_GRADIO_AUTH}"
   fi
-  PYTHONUNBUFFERED=1 service_loop "python webui.py --xformers --port $SD_WEBUI_PORT --subpath sd-webui $auth --controlnet-dir $MODEL_DIR/controlnet/ --enable-insecure-extension-access ${EXTRA_SD_WEBUI_ARGS}" > $LOG_DIR/sd_webui.log 2>&1 &
+
+  # ✅ Show logs in terminal and save to file
+  PYTHONUNBUFFERED=1 service_loop "python webui.py --xformers --port $SD_WEBUI_PORT --subpath sd-webui $auth --controlnet-dir $MODEL_DIR/controlnet/ --enable-insecure-extension-access ${EXTRA_SD_WEBUI_ARGS}" 2>&1 | tee $LOG_DIR/sd_webui.log &
   echo $! > /tmp/sd_webui.pid
 fi
-
 
 send_to_discord "Stable Diffusion WebUI Started"
 
 if env | grep -q "PAPERSPACE"; then
   send_to_discord "Link: https://$PAPERSPACE_FQDN/sd-webui/"
 fi
-
 
 if [[ -n "${CF_TOKEN}" ]]; then
   if [[ "$RUN_SCRIPT" != *"sd_webui"* ]]; then
