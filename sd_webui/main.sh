@@ -50,10 +50,13 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
 
     pip install pip==24.0
     pip install --upgrade wheel setuptools
-    
+
+    # 🔒 Pin NumPy early to prevent ABI mismatches
+    pip install numpy==1.26.4
+
     # fix install issue with pycairo, which is needed by sd-webui-controlnet
     apt-get install -y libcairo2-dev libjpeg-dev libgif-dev
-    
+
     # remove any preinstalled versions
     pip uninstall -y torch torchvision torchaudio protobuf lxml || true
 
@@ -80,8 +83,11 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     python $current_dir/preinstall.py
     cd $current_dir
 
+    # 🔄 Ensure scikit-image matches pinned NumPy
+    pip install --force-reinstall --no-cache-dir scikit-image
+
     pip install xformers
-    
+
     touch /tmp/sd_webui.prepared
 else
     source $VENV_DIR/sd_webui-env/bin/activate
