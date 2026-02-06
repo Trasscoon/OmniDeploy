@@ -16,7 +16,13 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     TARGET_REPO_DIR=$REPO_DIR \
     UPDATE_REPO=$SD_WEBUI_UPDATE_REPO \
     UPDATE_REPO_COMMIT=$SD_WEBUI_UPDATE_REPO_COMMIT \
-    prepare_repo 
+    prepare_repo
+
+    # --- Force A1111 dev branch (fixes GitHub auth / repo issues) ---
+    cd "$REPO_DIR"
+    git fetch origin
+    git switch dev || git checkout -b dev origin/dev
+    cd "$current_dir"
 
     # git clone extensions that have their own model folder
     if [[ ! -d "${REPO_DIR}/extensions/sd-webui-controlnet" ]]; then
