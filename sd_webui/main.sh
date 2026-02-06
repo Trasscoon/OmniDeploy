@@ -44,16 +44,21 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     )
     prepare_link  "${symlinks[@]}"
 
+    # --- Create fresh virtual environment ---
     rm -rf $VENV_DIR/sd_webui-env
     python3.10 -m venv $VENV_DIR/sd_webui-env
     source $VENV_DIR/sd_webui-env/bin/activate
 
+    # --- Bootstrap pip, wheel, setuptools ---
     pip install pip==24.0
     pip install --upgrade wheel setuptools
-    
+
+    # 🔒 Pin NumPy early to avoid ABI mismatch
+    pip install numpy==1.26.4
+
     # fix install issue with pycairo, which is needed by sd-webui-controlnet
     apt-get install -y libcairo2-dev libjpeg-dev libgif-dev
-    
+
     # remove any preinstalled versions
     pip uninstall -y torch torchvision torchaudio protobuf lxml || true
 
@@ -77,11 +82,17 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
 
     export PYTHONPATH="$PYTHONPATH:$REPO_DIR"
     cd $REPO_DIR
+
+    # 🔒 Prevent preinstall.py from upgrading NumPy
+    pip install "numpy==1.26.4" --no-deps
     python $current_dir/preinstall.py
     cd $current_dir
 
     pip install xformers
-    
+
+    # 🔁 Reinstall scikit-image after everything to guarantee ABI match
+    pip install --force-reinstall --no-cache-dir scikit-image
+
     touch /tmp/sd_webui.prepared
 else
     source $VENV_DIR/sd_webui-env/bin/activate
