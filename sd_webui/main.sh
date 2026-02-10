@@ -80,6 +80,7 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
 
     export PYTHONPATH="$PYTHONPATH:$REPO_DIR"
     cd $REPO_DIR
+    pip install --force-reinstall setuptools==69.5.1
     python $current_dir/preinstall.py
     cd $current_dir
 
