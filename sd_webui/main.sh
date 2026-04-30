@@ -45,7 +45,9 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     prepare_link  "${symlinks[@]}"
 
     rm -rf $VENV_DIR/sd_webui-env
-    python3.10 -m venv $VENV_DIR/sd_webui-env
+
+    # --- Use python3.11 to match the gradient-base:pt211 container ---
+    python3.11 -m venv $VENV_DIR/sd_webui-env
     source $VENV_DIR/sd_webui-env/bin/activate
 
     pip install pip==24.0
@@ -60,23 +62,35 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     # remove any preinstalled versions
     pip uninstall -y torch torchvision torchaudio protobuf lxml || true
 
-    # Detect CUDA version
-    CUDA_VER=""
+    # --- Detect CUDA version from driver major version ---
+    CUDA_VER="cpu"
     if command -v nvidia-smi &> /dev/null; then
         DRIVER_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)
         echo "NVIDIA driver detected: $DRIVER_VER"
-        if [[ $(python3 -c "import torch; import re; print('cu121' if int(''.join(re.findall(r'[0-9]+', '$DRIVER_VER'))[:3]) >= 525 else 'cu118')") == "cu121" ]]; then
+        MAJOR=$(echo $DRIVER_VER | cut -d'.' -f1)
+        echo "Driver major version: $MAJOR"
+        if [[ $MAJOR -ge 530 ]]; then
             CUDA_VER="cu121"
-        else
+        elif [[ $MAJOR -ge 520 ]]; then
+            CUDA_VER="cu120"   # covers gradient-base:pt211-cudatk120 machines
+        elif [[ $MAJOR -ge 450 ]]; then
             CUDA_VER="cu118"
+        else
+            echo "Driver $DRIVER_VER is too old for CUDA builds. Falling back to CPU-only PyTorch."
+            CUDA_VER="cpu"
         fi
     else
-        CUDA_VER="cpu"
         echo "No NVIDIA GPU detected. Installing CPU-only PyTorch."
     fi
 
     echo "Installing torch/torchvision/torchaudio for $CUDA_VER ..."
-    pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --extra-index-url https://download.pytorch.org/whl/$CUDA_VER
+    # Use torch 2.1.1 — matches container pre-installs and has better py3.11 support
+    if [[ "$CUDA_VER" == "cpu" ]]; then
+        pip install torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1
+    else
+        pip install torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 \
+            --extra-index-url https://download.pytorch.org/whl/$CUDA_VER
+    fi
 
     export PYTHONPATH="$PYTHONPATH:$REPO_DIR"
     cd $REPO_DIR
@@ -109,13 +123,20 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   echo "### Starting Stable Diffusion WebUI ###"
   log "Starting Stable Diffusion WebUI"
   cd $REPO_DIR
+
   auth=""
   if [[ -n "${SD_WEBUI_GRADIO_AUTH}" ]]; then
     auth="--gradio-auth ${SD_WEBUI_GRADIO_AUTH}"
   fi
 
+  # --- Pass --skip-torch-cuda-test and --no-half on CPU fallback ---
+  EXTRA_FLAGS=""
+  if [[ "$CUDA_VER" == "cpu" ]]; then
+    EXTRA_FLAGS="--skip-torch-cuda-test --no-half"
+  fi
+
   # ✅ Show logs in terminal and save to file
-  PYTHONUNBUFFERED=1 service_loop "python webui.py --xformers --port $SD_WEBUI_PORT --subpath sd-webui $auth --controlnet-dir $MODEL_DIR/controlnet/ --enable-insecure-extension-access ${EXTRA_SD_WEBUI_ARGS}" 2>&1 | tee $LOG_DIR/sd_webui.log &
+  PYTHONUNBUFFERED=1 service_loop "python webui.py --xformers --port $SD_WEBUI_PORT --subpath sd-webui $auth --controlnet-dir $MODEL_DIR/controlnet/ --enable-insecure-extension-access $EXTRA_FLAGS ${EXTRA_SD_WEBUI_ARGS}" 2>&1 | tee $LOG_DIR/sd_webui.log &
   echo $! > /tmp/sd_webui.pid
 fi
 
