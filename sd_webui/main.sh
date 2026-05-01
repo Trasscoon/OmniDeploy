@@ -165,6 +165,17 @@ PYEOF
     cd $REPO_DIR
     pip install --force-reinstall setuptools==69.5.1
     python $current_dir/preinstall.py
+
+    # 🔒 Pin mediapipe AFTER preinstall so we override whatever version the
+    #    controlnet_aux requirements resolved to. controlnet_aux 0.0.9 uses the
+    #    legacy mp.solutions API (mp.solutions.drawing_utils etc.) which was
+    #    removed in mediapipe >= 0.10.14. mediapipe 0.10.3 is the newest build
+    #    that (a) still has the full solutions namespace and (b) ships cp311
+    #    wheels (0.9.x never had cp311 wheels so cannot be used here).
+    #    Available cp311 builds start at 0.10.5; use the oldest to stay as
+    #    close as possible to the legacy API surface.
+    pip install "mediapipe==0.10.5"
+
     cd $current_dir
 
     # 🔒 Pin scikit-image to last version compatible with numpy<2 (no-cache avoids
@@ -187,6 +198,22 @@ PYEOF
         pip install --force-reinstall torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 \
             --extra-index-url https://download.pytorch.org/whl/$CUDA_VER
     fi
+
+    # 🔒 FINAL re-pin of numpy and pillow.
+    #    torchvision's --force-reinstall above re-resolves its own unpinned
+    #    numpy and pillow deps, pulling numpy 2.4.4 and pillow 12.x — both of
+    #    which break the stack:
+    #      numpy 2.4.4 causes a fatal ABI mismatch in scikit-image 0.21.0
+    #      ("numpy.dtype size changed"), crashing modules/processing.py and
+    #      killing all image generation (txt2img, img2img, inpainting).
+    #      pillow 12.x is rejected by gradio 3.41.2 (<11.0) and blendmodes (<10).
+    #    These lines must remain the very last pip commands before the sentinel.
+    pip install numpy==1.26.4
+    pip install "pillow>=9.0.1,<10.0"
+    # 🔒 Pin markupsafe: the --force-reinstall torch step pulls markupsafe 3.0.3
+    #    via jinja2, but gradio 3.41.2 requires markupsafe~=2.0. 3.x causes
+    #    Gradio template rendering errors in the WebUI.
+    pip install "markupsafe>=2.0,<3.0"
 
     touch /tmp/sd_webui.prepared
 else
