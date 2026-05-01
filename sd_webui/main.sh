@@ -10,6 +10,29 @@ trap 'error_exit "### ERROR ###"' ERR
 
 echo "### Setting up Stable Diffusion WebUI ###"
 log "Setting up Stable Diffusion WebUI"
+
+# --- CUDA detection runs ALWAYS (outside install block) so launch section can use it too ---
+CUDA_VER="cpu"
+if command -v nvidia-smi &> /dev/null; then
+    DRIVER_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)
+    echo "NVIDIA driver detected: $DRIVER_VER"
+    MAJOR=$(echo $DRIVER_VER | cut -d'.' -f1)
+    echo "Driver major version: $MAJOR"
+    if [[ $MAJOR -ge 530 ]]; then
+        CUDA_VER="cu121"
+    elif [[ $MAJOR -ge 520 ]]; then
+        CUDA_VER="cu120"
+    elif [[ $MAJOR -ge 450 ]]; then
+        CUDA_VER="cu118"
+    else
+        echo "Driver $DRIVER_VER is too old for CUDA builds. Falling back to CPU-only PyTorch."
+        CUDA_VER="cpu"
+    fi
+else
+    echo "No NVIDIA GPU detected. Installing CPU-only PyTorch."
+fi
+echo "Selected CUDA variant: $CUDA_VER"
+
 if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
 
     TARGET_REPO_URL="https://github.com/AUTOMATIC1111/stable-diffusion-webui.git" \
@@ -62,34 +85,53 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     # remove any preinstalled versions
     pip uninstall -y torch torchvision torchaudio protobuf lxml || true
 
-    # --- Detect CUDA version from driver major version ---
-    CUDA_VER="cpu"
-    if command -v nvidia-smi &> /dev/null; then
-        DRIVER_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | head -n1)
-        echo "NVIDIA driver detected: $DRIVER_VER"
-        MAJOR=$(echo $DRIVER_VER | cut -d'.' -f1)
-        echo "Driver major version: $MAJOR"
-        if [[ $MAJOR -ge 530 ]]; then
-            CUDA_VER="cu121"
-        elif [[ $MAJOR -ge 520 ]]; then
-            CUDA_VER="cu120"   # covers gradient-base:pt211-cudatk120 machines
-        elif [[ $MAJOR -ge 450 ]]; then
-            CUDA_VER="cu118"
-        else
-            echo "Driver $DRIVER_VER is too old for CUDA builds. Falling back to CPU-only PyTorch."
-            CUDA_VER="cpu"
-        fi
-    else
-        echo "No NVIDIA GPU detected. Installing CPU-only PyTorch."
-    fi
-
     echo "Installing torch/torchvision/torchaudio for $CUDA_VER ..."
-    # Use torch 2.1.1 — matches container pre-installs and has better py3.11 support
     if [[ "$CUDA_VER" == "cpu" ]]; then
         pip install torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1
     else
         pip install torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 \
             --extra-index-url https://download.pytorch.org/whl/$CUDA_VER
+    fi
+
+    # --- Live CUDA verification: if torch.cuda actually fails at runtime, fall back to CPU ---
+    if [[ "$CUDA_VER" != "cpu" ]]; then
+        echo "Verifying CUDA is actually usable at runtime..."
+        if ! python3.11 -c "import torch; torch.cuda.current_device(); print('CUDA OK')" 2>/dev/null; then
+            echo "⚠️  CUDA runtime test failed with $CUDA_VER build. Falling back to CPU-only torch."
+            pip uninstall -y torch torchvision torchaudio || true
+            pip install torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1
+            CUDA_VER="cpu"
+        else
+            echo "✅ CUDA verified working."
+        fi
+    fi
+
+    # --- Patch A1111 errors.py for Python 3.11 traceback compatibility ---
+    # Prevents the secondary AttributeError crash when CUDA raises a string-based error.
+    ERRORS_PY="$REPO_DIR/modules/errors.py"
+    if [[ -f "$ERRORS_PY" ]]; then
+        echo "Patching $ERRORS_PY ..."
+        python3.11 "$ERRORS_PY" 2>/dev/null || true  # pre-check, ignore result
+        python3.11 - "$ERRORS_PY" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path, 'r') as f:
+    src = f.read()
+
+old = 'te = traceback.TracebackException.from_exception(e)'
+new = ('if isinstance(e, BaseException):\n'
+       '            te = traceback.TracebackException.from_exception(e)\n'
+       '        else:\n'
+       '            te = traceback.TracebackException(type(Exception), Exception(str(e)), None)')
+
+if old in src:
+    src = src.replace(old, new)
+    with open(path, 'w') as f:
+        f.write(src)
+    print("errors.py patched successfully.")
+else:
+    print("Patch pattern not found in errors.py - may already be applied or file changed.")
+PYEOF
     fi
 
     export PYTHONPATH="$PYTHONPATH:$REPO_DIR"
@@ -129,11 +171,13 @@ if [[ -z "$INSTALL_ONLY" ]]; then
     auth="--gradio-auth ${SD_WEBUI_GRADIO_AUTH}"
   fi
 
-  # --- Pass --skip-torch-cuda-test and --no-half on CPU fallback ---
-  EXTRA_FLAGS=""
+  # --skip-torch-cuda-test is always safe: skips startup CUDA probe on GPU,
+  # prevents crash loops on CPU. --no-half is required when running without CUDA.
+  EXTRA_FLAGS="--skip-torch-cuda-test"
   if [[ "$CUDA_VER" == "cpu" ]]; then
-    EXTRA_FLAGS="--skip-torch-cuda-test --no-half"
+    EXTRA_FLAGS="$EXTRA_FLAGS --no-half"
   fi
+  echo "Launch flags: $EXTRA_FLAGS"
 
   # ✅ Show logs in terminal and save to file
   PYTHONUNBUFFERED=1 service_loop "python webui.py --xformers --port $SD_WEBUI_PORT --subpath sd-webui $auth --controlnet-dir $MODEL_DIR/controlnet/ --enable-insecure-extension-access $EXTRA_FLAGS ${EXTRA_SD_WEBUI_ARGS}" 2>&1 | tee $LOG_DIR/sd_webui.log &
