@@ -107,31 +107,58 @@ if [[ "$REINSTALL_SD_WEBUI" || ! -f "/tmp/sd_webui.prepared" ]]; then
     fi
 
     # --- Patch A1111 errors.py for Python 3.11 traceback compatibility ---
-    # Prevents the secondary AttributeError crash when CUDA raises a string-based error.
+    # Only applied if the unpatched pattern is present; skipped on dev branch builds
+    # that already handle this natively.
     ERRORS_PY="$REPO_DIR/modules/errors.py"
-    if [[ -f "$ERRORS_PY" ]]; then
+    if [[ -f "$ERRORS_PY" ]] && grep -q "te = traceback.TracebackException.from_exception(e)" "$ERRORS_PY" && ! grep -q "isinstance(e, BaseException)" "$ERRORS_PY"; then
         echo "Patching $ERRORS_PY ..."
-        python3.11 "$ERRORS_PY" 2>/dev/null || true  # pre-check, ignore result
         python3.11 - "$ERRORS_PY" <<'PYEOF'
-import sys
+import sys, py_compile, tempfile, os
+
 path = sys.argv[1]
 with open(path, 'r') as f:
     src = f.read()
 
 old = 'te = traceback.TracebackException.from_exception(e)'
-new = ('if isinstance(e, BaseException):\n'
-       '            te = traceback.TracebackException.from_exception(e)\n'
-       '        else:\n'
-       '            te = traceback.TracebackException(type(Exception), Exception(str(e)), None)')
 
-if old in src:
-    src = src.replace(old, new)
-    with open(path, 'w') as f:
-        f.write(src)
-    print("errors.py patched successfully.")
+# Detect the exact indentation of the target line
+indent = ''
+for line in src.split('\n'):
+    if old in line:
+        indent = line[:len(line) - len(line.lstrip())]
+        break
 else:
-    print("Patch pattern not found in errors.py - may already be applied or file changed.")
+    print("Pattern not found - skipping patch.")
+    sys.exit(0)
+
+# Build replacement preserving detected indentation
+new = (
+    indent + 'if isinstance(e, BaseException):\n' +
+    indent + '    te = traceback.TracebackException.from_exception(e)\n' +
+    indent + 'else:\n' +
+    indent + '    te = traceback.TracebackException(type(Exception), Exception(str(e)), None)'
+)
+
+patched = src.replace(indent + old, new)
+
+# Validate syntax before writing to disk
+with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as tmp:
+    tmp.write(patched)
+    tmp_path = tmp.name
+try:
+    py_compile.compile(tmp_path, doraise=True)
+except py_compile.PyCompileError as e:
+    print(f"Patch would produce invalid Python ({e}) - skipping.")
+    os.unlink(tmp_path)
+    sys.exit(0)
+os.unlink(tmp_path)
+
+with open(path, 'w') as f:
+    f.write(patched)
+print("errors.py patched successfully.")
 PYEOF
+    else
+        echo "Skipping errors.py patch (dev branch already compatible or already patched)."
     fi
 
     export PYTHONPATH="$PYTHONPATH:$REPO_DIR"
@@ -140,10 +167,26 @@ PYEOF
     python $current_dir/preinstall.py
     cd $current_dir
 
-    # 🔄 Ensure scikit-image matches pinned NumPy
-    pip install --force-reinstall --no-cache-dir scikit-image
+    # 🔒 Pin scikit-image to last version compatible with numpy<2 (no-cache avoids
+    #    stale wheels), then immediately re-anchor numpy so nothing else bumps it.
+    pip install --force-reinstall scikit-image==0.21.0
+    pip install numpy==1.26.4
 
-    pip install xformers
+    # 🔒 Pin xformers to the build that targets torch 2.1.x / CUDA 12.1.
+    #    Install with --no-deps so pip cannot replace the already-correct
+    #    torch 2.1.1+cu121 wheel with the generic PyPI torch 2.1.2 build.
+    #    The generic build bundles its own libcusparse.so.12 which references
+    #    __nvJitLinkAddData_12_1 — a symbol missing in the pt211 container's
+    #    libnvJitLink — causing an ImportError at launch.
+    pip install xformers==0.0.23.post1 --no-deps
+
+    # Re-anchor torch stack after xformers in case anything slipped through.
+    if [[ "$CUDA_VER" == "cpu" ]]; then
+        pip install --force-reinstall torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1
+    else
+        pip install --force-reinstall torch==2.1.1 torchvision==0.16.1 torchaudio==2.1.1 \
+            --extra-index-url https://download.pytorch.org/whl/$CUDA_VER
+    fi
 
     touch /tmp/sd_webui.prepared
 else
@@ -172,7 +215,7 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   fi
 
   # --skip-torch-cuda-test is always safe: skips startup CUDA probe on GPU,
-  # prevents crash loops on CPU. --no-half is required when running without CUDA.
+  # prevents crash loops on CPU. --no-half required when running without CUDA.
   EXTRA_FLAGS="--skip-torch-cuda-test"
   if [[ "$CUDA_VER" == "cpu" ]]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --no-half"
