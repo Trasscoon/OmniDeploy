@@ -29,6 +29,15 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
       "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO"
     )
     prepare_link "${symlinks[@]}"
+    # Create temporary symlinks for additional model folders
+    mkdir -p /tmp/stable-diffusion-models
+
+    ln -sfn /storage/stable-diffusion-comfy/models/diffusion_models \
+        /tmp/stable-diffusion-models/diffusion_models
+
+    ln -sfn /storage/stable-diffusion-comfy/models/text_encoders \
+        /tmp/stable-diffusion-models/text_encoders
+        
     rm -rf $VENV_DIR/sd_comfy-env
 
     python3.10 -m venv "$VENV_DIR/sd_comfy-env"
