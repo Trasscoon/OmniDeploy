@@ -10,6 +10,25 @@ trap 'error_exit "### ERROR ###"' ERR
 
 echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
+
+# ═══════════════════════════════════════════
+# CUDA 13.0 FORWARD COMPAT LAYER
+# Installs UMD 580 userspace on the locked 550 host
+# kernel, enabling cu130 PyTorch + comfy_kitchen's
+# native CUDA kernels on the RTX A6000.
+# Technique verified working on Paperspace A6000.
+# ═══════════════════════════════════════════
+if [[ ! -d /usr/local/cuda-13.0/compat ]]; then
+    log "Installing CUDA 13.0 forward-compatibility layer"
+    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+    dpkg -i cuda-keyring_1.1-1_all.deb
+    apt-get update -qq
+    apt-get install -y -qq cuda-compat-13-0
+fi
+export LD_LIBRARY_PATH="/usr/local/cuda-13.0/compat:${LD_LIBRARY_PATH:-}"
+ldconfig
+# ═══════════════════════════════════════════
+
 if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
 
     TARGET_REPO_URL="https://github.com/comfyanonymous/ComfyUI.git" \
@@ -37,11 +56,15 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
 
     ln -sfn /storage/stable-diffusion-comfy/models/text_encoders \
         /tmp/stable-diffusion-models/text_encoders
-        
+
     rm -rf $VENV_DIR/sd_comfy-env
 
     python3.10 -m venv "$VENV_DIR/sd_comfy-env"
     source $VENV_DIR/sd_comfy-env/bin/activate
+
+    # Persist the compat libcuda path for any shell that sources this venv
+    echo 'export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat:$LD_LIBRARY_PATH' \
+        >> $VENV_DIR/sd_comfy-env/bin/activate
 
     pip install pip==24.0
     pip install --upgrade wheel setuptools
@@ -49,25 +72,25 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     cd $REPO_DIR
 
     # ═══════════════════════════════════════════
-    # FIXED INSTALL ORDER
+    # FIXED INSTALL ORDER — cu130 stack
     # ═══════════════════════════════════════════
 
     # STEP 1: Install torch, torchvision, and torchaudio FIRST
     pip install \
-        torch==2.6.0 \
-        torchvision==0.21.0 \
-        torchaudio==2.6.0 \
-        --index-url https://download.pytorch.org/whl/cu124
+        torch==2.13.0 \
+        torchvision==0.28.0 \
+        torchaudio==2.11.0 \
+        --index-url https://download.pytorch.org/whl/cu130
 
     # STEP 2: Install xformers, telling it not to mess with torch
-    pip install xformers==0.0.29.post2 --no-deps
+    pip install xformers==0.0.35 --no-deps --index-url https://download.pytorch.org/whl/cu130
 
     # STEP 3: Create a constraints file to protect torch from requirements.txt
     cat > /tmp/torch-constraints.txt << 'EOF'
-torch==2.6.0
-torchvision==0.21.0
-torchaudio==2.6.0
-xformers==0.0.29.post2
+torch==2.13.0
+torchvision==0.28.0
+torchaudio==2.11.0
+xformers==0.0.35
 EOF
 
     # STEP 4: Install ComfyUI's requirements, respecting our constraints
@@ -76,12 +99,20 @@ EOF
     # STEP 5: Install comfy-aimdo LAST, so it builds against the correct torch
     pip install --no-cache-dir comfy-aimdo==0.4.13
 
-    # STEP 6: Verify everything is correct
+    # STEP 6: SageAttention — int8 attention on SM86 tensor cores
+    pip install sageattention
+
+    # STEP 7: Verify everything is correct
     python -c "
-import torch
+import ctypes, torch
 import comfy_aimdo.host_buffer
 import comfy_aimdo.vram_buffer
-print('--- Verification Success: torch and comfy-aimdo are correctly installed ---')
+
+lib = ctypes.CDLL('libcuda.so.1')
+v = ctypes.c_int()
+lib.cuDriverGetVersion(ctypes.byref(v))
+assert v.value >= 13000, f'CUDA 13.0 compat layer NOT active (got {v.value})'
+print(f'--- Verification Success: torch {torch.__version__}, comfy-aimdo OK, compat layer API {v.value} ---')
 "
     # ═══════════════════════════════════════════
     # END OF FIX
@@ -92,15 +123,6 @@ else
     source $VENV_DIR/sd_comfy-env/bin/activate
 fi
 log "Finished Preparing Environment for Stable Diffusion Comfy"
-
-if [[ -z "$SKIP_MODEL_DOWNLOAD" ]]; then
-  echo "### Downloading Model for Stable Diffusion Comfy ###"
-  log "Downloading Model for Stable Diffusion Comfy"
-  bash $current_dir/../utils/sd_model_download/main.sh
-  log "Finished Downloading Models for Stable Diffusion Comfy"
-else
-  log "Skipping Model Download for Stable Diffusion Comfy"
-fi
 
 # THIS IS THE CORRECTED VERSION
 if [[ -z "$INSTALL_ONLY" ]]; then
@@ -113,7 +135,7 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   cd "$REPO_DIR"
   VENV_PYTHON="$VENV_DIR/sd_comfy-env/bin/python"
   PYTHONUNBUFFERED=1 service_loop \
-"$VENV_PYTHON main.py --listen 0.0.0.0 --highvram --port $SD_COMFY_PORT ${EXTRA_SD_COMFY_ARGS}" \
+"$VENV_PYTHON main.py --listen 0.0.0.0 --highvram --port $SD_COMFY_PORT --use-sage-attention --preview-method latent-fast ${EXTRA_SD_COMFY_ARGS}" \
 > "$LOG_DIR/sd_comfy.log" 2>&1 &
   echo $! > /tmp/sd_comfy.pid
 fi
