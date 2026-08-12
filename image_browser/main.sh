@@ -25,6 +25,27 @@ if [[ "$REINSTALL_IMAGE_BROWSER" || ! -f "/tmp/image_browser.prepared" ]]; then
     
     source $VENV_DIR/image_browser-env/bin/activate
 
+    # --- FIX: Bypass av compilation entirely, use pre-built wheel ---
+    log "Installing system packages (minimal, for build tools only)"
+    apt-get update -qq
+    apt-get install -y --no-install-recommends \
+        pkg-config \
+        build-essential \
+        cython3
+
+    pip install pip==24.0
+    pip install --upgrade wheel setuptools
+
+    cd $REPO_DIR
+    # Strip the av line from a temp copy and install everything else
+    grep -v '^av' requirements.txt > requirements_no_av.txt
+    pip install -r requirements_no_av.txt
+    # Install a version with actual manylinux wheels (bundled ffmpeg)
+    pip install av==12.3.0
+    # Comment out the av line in the real requirements.txt so later calls don't choke
+    sed -i 's/^av/#av/' requirements.txt
+    # -----------------------------------------------------------------------
+    
     pip install pip==24.0
     pip install --upgrade wheel setuptools
     
