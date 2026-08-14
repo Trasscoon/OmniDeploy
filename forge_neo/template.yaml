@@ -1,0 +1,66 @@
+title: Stable Diffusion WebUI Forge Neo
+name: forge_neo
+use_python: true
+python_version: 11
+expose: true
+port: 7008
+
+prepare_repo: |-
+  if [[ ! -d "$REPO_DIR" ]]; then
+      git clone https://github.com/Haoming02/sd-webui-forge-classic.git \
+          "$REPO_DIR" --branch neo
+  else
+      cd "$REPO_DIR"
+      git fetch origin
+      git checkout neo
+      git reset --hard origin/neo
+      cd "$current_dir"
+  fi
+
+  symlinks=(
+      "$REPO_DIR/outputs:$IMAGE_OUTPUTS_DIR/stable-diffusion-webui"
+      "$MODEL_DIR:$WORKING_DIR/models"
+      "$MODEL_DIR/sd:$LINK_MODEL_TO"
+      "$MODEL_DIR/lora:$LINK_LORA_TO"
+      "$MODEL_DIR/vae:$LINK_VAE_TO"
+      "$MODEL_DIR/esrgan:$LINK_ESRGAN_TO"
+      "$MODEL_DIR/text_encoder:$LINK_TEXT_ENCODER_TO"
+      "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO"
+  )
+  prepare_link  "${symlinks[@]}"
+
+prepare_env: |-
+  apt-get install -y libcairo2-dev libjpeg-dev libgif-dev
+  pip uninstall -y torch torchvision torchaudio protobuf lxml
+
+  export PYTHONPATH="$PYTHONPATH:$REPO_DIR"
+  cd $REPO_DIR
+  python $current_dir/preinstall.py
+  cd $current_dir
+
+download_model: |-
+  echo "Skipping model download - user manages Anima models manually"
+
+start: |-
+  cd $REPO_DIR
+  auth=""
+  if [[ -n "${FORGE_NEO_GRADIO_AUTH}" ]]; then
+    auth="--gradio-auth ${FORGE_NEO_GRADIO_AUTH}"
+  fi
+  PYTHONUNBUFFERED=1 service_loop "python webui.py --xformers --port ${{ name|upper }}_PORT --subpath sd-webui $auth --enable-insecure-extension-access --skip-torch-cuda-test --skip-python-version-check ${EXTRA_{{ name|upper }}_ARGS}" > $LOG_DIR/{{ name }}.log 2>&1 &
+  echo $! > /tmp/{{ name }}.pid
+
+other_commands: |-
+  export MODEL_DIR="$DATA_DIR/stable-diffusion-models"
+  export REPO_DIR="$ROOT_REPO_DIR/sd-webui-forge-neo"
+
+  export {{ name|upper }}_PORT="{{ port }}"
+  export EXPOSE_PORTS="$EXPOSE_PORTS:${{ name|upper }}_PORT"
+  export PORT_MAPPING="$PORT_MAPPING:{{ name }}"
+
+  export LINK_MODEL_TO=${{ '{' ~ name|upper }}_LINK_MODEL_TO:-"${REPO_DIR}/models/Stable-diffusion"}
+  export LINK_VAE_TO=${{ '{' ~ name|upper }}_LINK_VAE_TO:-"${REPO_DIR}/models/VAE"}
+  export LINK_LORA_TO=${{ '{' ~ name|upper }}_LINK_LORA_TO:-"${REPO_DIR}/models/Lora"}
+  export LINK_ESRGAN_TO=${{ '{' ~ name|upper }}_LINK_ESRGAN_TO:-"${REPO_DIR}/models/ESRGAN"}
+  export LINK_TEXT_ENCODER_TO=${{ '{' ~ name|upper }}_LINK_TEXT_ENCODER_TO:-"${REPO_DIR}/models/text_encoder"}
+  export LINK_EMBEDDING_TO=${{ '{' ~ name|upper }}_LINK_EMBEDDING_TO:-"${REPO_DIR}/embeddings"}
