@@ -1,0 +1,9 @@
+torch
+timm==1.0.22
+numpy
+pillow<12
+einops
+safetensors
+gradio<6
+requests
+spaces
