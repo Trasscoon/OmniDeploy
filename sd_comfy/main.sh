@@ -10,21 +10,29 @@ trap 'error_exit "### ERROR ###"' ERR
 echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
 
-# --- CUDA 13.0 forward compat layer ---
+# --- CUDA 13.0 forward compat layer (use curl, not wget) ---
 if [[ ! -d /usr/local/cuda-13.0/compat ]]; then
     log "Installing CUDA 13.0 forward-compatibility layer"
-    wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-    dpkg -i cuda-keyring_1.1-1_all.deb
+    curl -L -o /tmp/cuda-keyring_1.1-1_all.deb \
+      https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+    dpkg -i /tmp/cuda-keyring_1.1-1_all.deb
     apt-get update -qq
     apt-get install -y -qq cuda-compat-13-0
 fi
 export LD_LIBRARY_PATH="/usr/local/cuda-13.0/compat:${LD_LIBRARY_PATH:-}"
 ldconfig
 
-# --- aria2 for fast downloads ---
+# --- aria2 ---
 command -v aria2c &> /dev/null || apt-get install -y -qq aria2
 
-# --- VAE downloads: skip-if-exists, no-op after first boot ---
+# --- Remove any leftover symlink from old persistent design ---
+if [[ -L "$WORKING_DIR" ]]; then
+    unlink "$WORKING_DIR"
+fi
+# Now create a real temp folder for models
+mkdir -p "$WORKING_DIR"
+
+# --- Download VAEs into /tmp (ephemeral, no storage cost) ---
 dl() {
     local url="$1" dir="$2" file
     file=$(basename "$url")
@@ -50,9 +58,9 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     UPDATE_REPO_COMMIT=$SD_COMFY_UPDATE_REPO_COMMIT \
     prepare_repo
 
-    # --- Symlinks: /storage models INTO /storage repo ---
+    # --- Symlink /tmp model subfolders into the /storage repo ---
+    # This keeps the repo on /storage but the big files live in /tmp
     symlinks=(
-      "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy"
       "$MODEL_DIR/sd:$LINK_MODEL_TO"
       "$MODEL_DIR/lora:$LINK_LORA_TO"
       "$MODEL_DIR/vae:$LINK_VAE_TO"
@@ -67,6 +75,9 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
       "$MODEL_DIR/geometry_estimation:$REPO_DIR/models/geometry_estimation"
     )
     prepare_link "${symlinks[@]}"
+
+    # --- Outputs go to /storage so generated images are kept (small) ---
+    prepare_link "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy"
 
     # --- Persistent custom nodes on /storage, symlinked into repo ---
     mkdir -p /storage/comfy_custom_nodes
@@ -91,7 +102,6 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
 
     cd $REPO_DIR
 
-    # --- CUDA 13 torch stack ---
     pip install torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 \
         --index-url https://download.pytorch.org/whl/cu130
     pip install xformers==0.0.35 --no-deps --index-url https://download.pytorch.org/whl/cu130
@@ -107,7 +117,6 @@ CONSTEOF
     pip install --no-cache-dir comfy-aimdo==0.4.13
     pip install GitPython opencv-python-headless imageio-ffmpeg uv
 
-    # --- SageAttention: arch-aware, A6000 = sm_86 ---
     GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
     if [[ "$GPU_NAME" == *"A100"* ]]; then
         SAGE_ARCH="8.0"; SAGE_DIR="/storage/sage_wheels/sm80"
@@ -147,7 +156,6 @@ CONSTEOF
         cd /tmp && rm -rf sageattention_build /tmp/sage_wheel_build
     fi
 
-    # --- Verification ---
     python -c "
 import ctypes, torch
 lib = ctypes.CDLL('libcuda.so.1')
@@ -175,15 +183,16 @@ if [[ -z "$INSTALL_ONLY" ]]; then
   echo "### Starting Stable Diffusion Comfy ###"
   log "Starting Stable Diffusion Comfy"
 
+  pkill -9 -f "service_loop" 2>/dev/null || true
   fuser -k ${SD_COMFY_PORT}/tcp 2>/dev/null || true
-  pkill -9 -f "stable-diffusion-comfy" 2>/dev/null || true
-  sleep 2
+  pkill -9 -f "main.py" 2>/dev/null || true
+  sleep 3
 
   mkdir -p "$(dirname "$LOG_DIR/sd_comfy.log")"
   cd "$REPO_DIR"
   VENV_PYTHON="$VENV_DIR/sd_comfy-env/bin/python"
   PYTHONUNBUFFERED=1 service_loop \
-"$VENV_PYTHON main.py --listen 0.0.0.0 --highvram --port $SD_COMFY_PORT --disable-pinned-memory --disable-async-offload ${EXTRA_SD_COMFY_ARGS}" \
+"$VENV_PYTHON main.py --listen 0.0.0.0 --highvram --port $SD_COMFY_PORT --comfy-api-base sd-comfy --disable-pinned-memory --disable-async-offload ${EXTRA_SD_COMFY_ARGS}" \
 > "$LOG_DIR/sd_comfy.log" 2>&1 &
   echo $! > /tmp/sd_comfy.pid
 fi
