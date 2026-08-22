@@ -10,7 +10,7 @@ trap 'error_exit "### ERROR ###"' ERR
 echo "### Setting up Stable Diffusion Comfy ###"
 log "Setting up Stable Diffusion Comfy"
 
-# --- CUDA 13.0 forward compat layer (use curl, not wget) ---
+# --- CUDA 13.0 forward compat layer (curl, not wget) ---
 if [[ ! -d /usr/local/cuda-13.0/compat ]]; then
     log "Installing CUDA 13.0 forward-compatibility layer"
     curl -L -o /tmp/cuda-keyring_1.1-1_all.deb \
@@ -25,14 +25,66 @@ ldconfig
 # --- aria2 ---
 command -v aria2c &> /dev/null || apt-get install -y -qq aria2
 
-# --- Remove any leftover symlink from old persistent design ---
+# --- Create persistent and ephemeral model folders ---
+PERSISTENT_SUBDIRS=(checkpoints loras vae upscale_models controlnet embeddings diffusion_models text_encoders unet vae_approx model_patches geometry_estimation)
+EPHEMERAL_SUBDIRS=(checkpoints loras vae upscale_models controlnet embeddings diffusion_models text_encoders unet vae_approx model_patches geometry_estimation)
+
+mkdir -p "$MODEL_DIR"
+for sub in "${PERSISTENT_SUBDIRS[@]}"; do
+    mkdir -p "$MODEL_DIR/$sub"
+done
+
+# Remove any old symlink at /tmp/stable-diffusion-models
 if [[ -L "$WORKING_DIR" ]]; then
     unlink "$WORKING_DIR"
 fi
-# Now create a real temp folder for models
 mkdir -p "$WORKING_DIR"
+for sub in "${EPHEMERAL_SUBDIRS[@]}"; do
+    mkdir -p "$WORKING_DIR/$sub"
+done
 
-# --- Download VAEs into /tmp (ephemeral, no storage cost) ---
+# Remove old symlinks from ComfyUI repo's models folder (we rely on extra_model_paths.yaml)
+rm -f "$REPO_DIR/models/checkpoints" "$REPO_DIR/models/vae" "$REPO_DIR/models/loras" \
+       "$REPO_DIR/models/controlnet" "$REPO_DIR/models/embeddings" "$REPO_DIR/models/upscale_models" \
+       "$REPO_DIR/models/diffusion_models" "$REPO_DIR/models/text_encoders" "$REPO_DIR/models/unet" \
+       "$REPO_DIR/models/vae_approx" "$REPO_DIR/models/model_patches" "$REPO_DIR/models/geometry_estimation"
+
+# --- Write extra_model_paths.yaml so ComfyUI scans BOTH /storage and /tmp ---
+cat > "$REPO_DIR/extra_model_paths.yaml" << 'YAMLEOF'
+# Persistent models on /storage
+persistent:
+    base_path: /storage/stable-diffusion-models
+    checkpoints: checkpoints
+    loras: loras
+    vae: vae
+    upscale_models: upscale_models
+    controlnet: controlnet
+    embeddings: embeddings
+    diffusion_models: diffusion_models
+    text_encoders: text_encoders
+    unet: unet
+    vae_approx: vae_approx
+    model_patches: model_patches
+    geometry_estimation: geometry_estimation
+
+# Ephemeral models on /tmp
+ephemeral:
+    base_path: /tmp/stable-diffusion-models
+    checkpoints: checkpoints
+    loras: loras
+    vae: vae
+    upscale_models: upscale_models
+    controlnet: controlnet
+    embeddings: embeddings
+    diffusion_models: diffusion_models
+    text_encoders: text_encoders
+    unet: unet
+    vae_approx: vae_approx
+    model_patches: model_patches
+    geometry_estimation: geometry_estimation
+YAMLEOF
+
+# --- Download VAE files into /tmp (ephemeral, no storage cost) ---
 dl() {
     local url="$1" dir="$2" file
     file=$(basename "$url")
@@ -46,9 +98,9 @@ dl() {
     fi
 }
 
-dl "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors" "$MODEL_DIR/vae"
-dl "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors" "$MODEL_DIR/vae"
-dl "https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/vae/qwen_image_vae.safetensors" "$MODEL_DIR/vae"
+dl "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors" "$WORKING_DIR/vae"
+dl "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors" "$WORKING_DIR/vae"
+dl "https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/vae/qwen_image_vae.safetensors" "$WORKING_DIR/vae"
 
 if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
 
@@ -58,25 +110,7 @@ if [[ "$REINSTALL_SD_COMFY" || ! -f "/tmp/sd_comfy.prepared" ]]; then
     UPDATE_REPO_COMMIT=$SD_COMFY_UPDATE_REPO_COMMIT \
     prepare_repo
 
-    # --- Symlink /tmp model subfolders into the /storage repo ---
-    # This keeps the repo on /storage but the big files live in /tmp
-    symlinks=(
-      "$MODEL_DIR/sd:$LINK_MODEL_TO"
-      "$MODEL_DIR/lora:$LINK_LORA_TO"
-      "$MODEL_DIR/vae:$LINK_VAE_TO"
-      "$MODEL_DIR/upscaler:$LINK_UPSCALER_TO"
-      "$MODEL_DIR/controlnet:$LINK_CONTROLNET_TO"
-      "$MODEL_DIR/embedding:$LINK_EMBEDDING_TO"
-      "$MODEL_DIR/diffusion_models:$REPO_DIR/models/diffusion_models"
-      "$MODEL_DIR/text_encoders:$REPO_DIR/models/text_encoders"
-      "$MODEL_DIR/unet:$REPO_DIR/models/unet"
-      "$MODEL_DIR/vae_approx:$REPO_DIR/models/vae_approx"
-      "$MODEL_DIR/model_patches:$REPO_DIR/models/model_patches"
-      "$MODEL_DIR/geometry_estimation:$REPO_DIR/models/geometry_estimation"
-    )
-    prepare_link "${symlinks[@]}"
-
-    # --- Outputs go to /storage so generated images are kept (small) ---
+    # --- Outputs go to /storage (small) ---
     prepare_link "$REPO_DIR/output:$IMAGE_OUTPUTS_DIR/stable-diffusion-comfy"
 
     # --- Persistent custom nodes on /storage, symlinked into repo ---
