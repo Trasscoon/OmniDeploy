@@ -183,6 +183,7 @@ if [[ "$REINSTALL_FORGE_NEO" || ! -f "/tmp/forge_neo.prepared" ]]; then
         echo "nvcc: $(nvcc --version 2>/dev/null | tail -1 || echo 'not found')"
 
         SAGE_DIR="$REPO_DIR/repo/SageAttention"
+        bash $current_dir/sync_model_pool.sh
         mkdir -p "$REPO_DIR/repo"
         if [[ ! -d "$SAGE_DIR" ]]; then
             git clone https://github.com/thu-ml/SageAttention.git "$SAGE_DIR"
