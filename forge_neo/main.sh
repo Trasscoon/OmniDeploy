@@ -12,10 +12,6 @@ log "Setting up Forge Neo"
 
 # ============================================================
 # CUDA 13.0 FORWARD COMPATIBILITY SETUP
-# Installs cuda-compat-13-0 (user-mode 580 libs) + full toolkit
-# (nvcc 13.0) so torch cu130 wheels can run AND compile extensions
-# on the 550.x kernel driver. Runs every boot (container is
-# ephemeral, nothing in /usr/local survives).
 # ============================================================
 setup_cuda13() {
     if [[ -d "/usr/local/cuda-13.0/compat" && -f "/usr/local/cuda-13.0/bin/nvcc" ]]; then
@@ -24,19 +20,16 @@ setup_cuda13() {
     fi
     echo "Installing CUDA 13.0 forward-compat layer + toolkit..."
 
-    # Keyring in case it's a fresh container
     if ! apt-cache show cuda-compat-13-0 &>/dev/null; then
         wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb -O /tmp/cuda-keyring.deb
         dpkg -i /tmp/cuda-keyring.deb || true
         apt-get update
     fi
 
-    # Compat layer first (user-mode driver libs for 550 kernel driver)
     if [[ ! -d "/usr/local/cuda-13.0/compat" ]]; then
         apt-get install -y cuda-compat-13-0 || return 1
     fi
 
-    # Full toolkit (nvcc + dev headers for extension compilation)
     if [[ ! -f "/usr/local/cuda-13.0/bin/nvcc" ]]; then
         apt-get install -y cuda-toolkit-13-0 || \
             apt-get install -y cuda-nvcc-13-0 cuda-cudart-dev-13-0 \
@@ -64,9 +57,9 @@ if command -v nvidia-smi &> /dev/null; then
         TORCH_VER="2.9.1"
         TORCHVISION_VER="0.24.1"
         TORCHAUDIO_VER="2.9.1"
-        echo "✅ CUDA 13.0 stack active (compat + nvcc) on driver $DRIVER_VER"
+        echo "CUDA 13.0 stack active (compat + nvcc) on driver $DRIVER_VER"
     else
-        echo "⚠️  CUDA 13.0 setup failed. Falling back to driver-native CUDA."
+        echo "CUDA 13.0 setup failed. Falling back to driver-native CUDA."
         MAJOR=$(echo $DRIVER_VER | cut -d'.' -f1)
         if [[ $MAJOR -ge 530 ]]; then
             CUDA_VER="cu124"
@@ -95,6 +88,13 @@ verify_cuda() {
     python -c "import torch; torch.cuda.current_device(); print('CUDA OK -', torch.cuda.get_device_name(0), '| torch', torch.__version__, '| cuda', torch.version.cuda)" 2>/dev/null
 }
 
+purge_xformers_if_unwanted() {
+    if [[ "$CUDA_VER" == "cu130" || "$CUDA_VER" == "cpu" ]]; then
+        echo "Ensuring xformers is not present (incompatible with torch 2.9.x/cu130)..."
+        pip uninstall -y xformers || true
+    fi
+}
+
 if [[ "$REINSTALL_FORGE_NEO" || ! -f "/tmp/forge_neo.prepared" ]]; then
 
     # --- Clone / update Forge Neo ---
@@ -111,7 +111,7 @@ if [[ "$REINSTALL_FORGE_NEO" || ! -f "/tmp/forge_neo.prepared" ]]; then
         cd "$current_dir"
     fi
 
-    # --- Symlinks (Forge Neo native folder structure) ---
+    # --- Symlinks ---
     symlinks=(
         "$REPO_DIR/outputs:$IMAGE_OUTPUTS_DIR/stable-diffusion-webui"
         "$MODEL_DIR:$WORKING_DIR/models"
@@ -140,7 +140,7 @@ if [[ "$REINSTALL_FORGE_NEO" || ! -f "/tmp/forge_neo.prepared" ]]; then
     # --- Torch install with fallback chain ---
     echo "Installing PyTorch $TORCH_VER for $CUDA_VER ..."
     if ! install_torch; then
-        echo "⚠️  torch $TORCH_VER+$CUDA_VER wheels unavailable. Trying cu124/2.5.1..."
+        echo "torch $TORCH_VER+$CUDA_VER wheels unavailable. Trying cu124/2.5.1..."
         unset LD_LIBRARY_PATH
         unset CUDA_HOME
         CUDA_VER="cu124"; TORCH_VER="2.5.1"; TORCHVISION_VER="0.20.1"; TORCHAUDIO_VER="2.5.1"
@@ -150,40 +150,41 @@ if [[ "$REINSTALL_FORGE_NEO" || ! -f "/tmp/forge_neo.prepared" ]]; then
     if [[ "$CUDA_VER" != "cpu" ]]; then
         echo "Verifying CUDA runtime..."
         if ! verify_cuda; then
-            echo "⚠️  $CUDA_VER runtime test failed. Falling back to cu124/2.5.1."
+            echo "$CUDA_VER runtime test failed. Falling back to cu124/2.5.1."
             pip uninstall -y torch torchvision torchaudio || true
             unset LD_LIBRARY_PATH
             unset CUDA_HOME
             CUDA_VER="cu124"; TORCH_VER="2.5.1"; TORCHVISION_VER="0.20.1"; TORCHAUDIO_VER="2.5.1"
             install_torch
             if ! verify_cuda; then
-                echo "⚠️  cu124 also failed. CPU-only it is."
+                echo "cu124 also failed. CPU-only it is."
                 pip uninstall -y torch torchvision torchaudio || true
                 CUDA_VER="cpu"
                 install_torch
             fi
         fi
-        [[ "$CUDA_VER" != "cpu" ]] && echo "✅ CUDA verified working ($CUDA_VER)."
+        [[ "$CUDA_VER" != "cpu" ]] && echo "CUDA verified working ($CUDA_VER)."
     fi
 
-    # --- xformers: only on cu124 fallback path ---
+    # --- xformers: ONLY on cu124/cu121 path ---
     if [[ "$CUDA_VER" == "cu124" || "$CUDA_VER" == "cu121" ]]; then
         echo "Installing xformers for VAE fallback..."
         pip install xformers==0.0.28.post3 --no-deps || echo "xformers skipped (non-fatal)"
     fi
 
-    # --- Triton: torch pulls the matching version, ensure present ---
+    purge_xformers_if_unwanted
+
+    # --- Triton ---
     if [[ "$CUDA_VER" != "cpu" ]]; then
         pip install triton || echo "Using torch-bundled triton"
     fi
 
-    # --- SageAttention from source (nvcc 13 now matches torch 2.9.1+cu130) ---
+    # --- SageAttention from source ---
     if [[ "$CUDA_VER" != "cpu" ]]; then
         echo "Installing SageAttention from source..."
         echo "nvcc: $(nvcc --version 2>/dev/null | tail -1 || echo 'not found')"
 
         SAGE_DIR="$REPO_DIR/repo/SageAttention"
-        bash $current_dir/sync_model_pool.sh
         mkdir -p "$REPO_DIR/repo"
         if [[ ! -d "$SAGE_DIR" ]]; then
             git clone https://github.com/thu-ml/SageAttention.git "$SAGE_DIR"
@@ -194,11 +195,10 @@ if [[ "$REINSTALL_FORGE_NEO" || ! -f "/tmp/forge_neo.prepared" ]]; then
         pip install -e . --no-build-isolation
         cd "$current_dir"
 
-        # Verify import
         if python -c "from sageattention import sageattn; print('SageAttention IMPORT OK')" 2>/dev/null; then
-            echo "✅ SageAttention installed and importable."
+            echo "SageAttention installed and importable."
         else
-            echo "⚠️  SageAttention build succeeded but import test failed."
+            echo "SageAttention build succeeded but import test failed."
         fi
     fi
 
@@ -220,18 +220,16 @@ if [[ "$REINSTALL_FORGE_NEO" || ! -f "/tmp/forge_neo.prepared" ]]; then
     touch /tmp/forge_neo.prepared
 else
     source $VENV_DIR/forge_neo-env/bin/activate
-    # Relaunch needs the env vars again (new shell)
     if [[ -d "/usr/local/cuda-13.0/compat" ]]; then
         export LD_LIBRARY_PATH="/usr/local/cuda-13.0/compat:/usr/local/cuda-13.0/lib64:${LD_LIBRARY_PATH}"
         export CUDA_HOME="/usr/local/cuda-13.0"
         export PATH="$CUDA_HOME/bin:$PATH"
         CUDA_VER="cu130"
     fi
+    purge_xformers_if_unwanted
 fi
 
 log "Finished Preparing Environment for Forge Neo"
-
-# --- No model download step: user drops Anima files into $MODEL_DIR/sd manually ---
 
 if [[ -z "$INSTALL_ONLY" ]]; then
     echo "### Starting Forge Neo ###"
@@ -248,11 +246,15 @@ if [[ -z "$INSTALL_ONLY" ]]; then
         EXTRA_FLAGS="$EXTRA_FLAGS --no-half"
     fi
 
-    LAUNCH_ARGS="--xformers --port $FORGE_NEO_PORT --subpath sd-webui $auth --enable-insecure-extension-access $EXTRA_FLAGS ${EXTRA_FORGE_NEO_ARGS}"
+    # --- PURGE xformers one last time before launch ---
+    source $VENV_DIR/forge_neo-env/bin/activate 2>/dev/null || true
+    pip uninstall -y xformers 2>/dev/null || true
+
+    LAUNCH_ARGS="--port $FORGE_NEO_PORT --subpath sd-webui $auth --enable-insecure-extension-access $EXTRA_FLAGS ${EXTRA_FORGE_NEO_ARGS}"
 
     echo "Launch args: $LAUNCH_ARGS"
 
-    # ✅ Forge Neo uses launch.py, NOT webui.py
+    mkdir -p "$LOG_DIR"
     PYTHONUNBUFFERED=1 service_loop "python launch.py $LAUNCH_ARGS" 2>&1 | tee $LOG_DIR/forge_neo.log &
     echo $! > /tmp/forge_neo.pid
 fi
