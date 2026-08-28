@@ -2,23 +2,17 @@
 POOL=/storage/stable-diffusion-models
 TMPPOOL=/tmp/stable-diffusion-models
 
-# Rescue any real files sitting in /tmp before bridging
-for d in sd vae lora esrgan text_encoder embedding; do
-    if [[ -d "$TMPPOOL/$d" && ! -L "$TMPPOOL/$d" ]]; then
-        mkdir -p "$POOL/$d"
-        cp -rn "$TMPPOOL/$d/"* "$POOL/$d/" 2>/dev/null
-    fi
-done
+# Ensure base directories exist on persistent storage
+mkdir -p "$POOL"/{sd,vae,lora,esrgan,text_encoder,embedding}
 
-# /tmp folders -> /storage (downloads to /tmp land on persistent storage)
+# Remove any old /tmp model folder and replace with symlinks
 rm -rf "$TMPPOOL"
 mkdir -p "$TMPPOOL"
 for d in sd vae lora esrgan text_encoder embedding; do
-    mkdir -p "$POOL/$d"
     ln -sfn "$POOL/$d" "$TMPPOOL/$d"
 done
 
-# Bridge ComfyUI-style folders so Forge Neo sees them
+# Bridge ComfyUI-style folders into the shared pool
 link_files() {
     [[ -d "$1" ]] || return 0
     mkdir -p "$2"
