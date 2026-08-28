@@ -22,7 +22,7 @@ done
 link_files() {
     [[ -d "$1" ]] || return 0
     mkdir -p "$2"
-    find "$1" -maxdepth 1 -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pt" -o -name "*.pth" -o -name "*.bin" \) -exec ln -sf {} "$2/" \;
+    find "$1" -maxdepth 1 -type f \( -name "*.safetensors" -o -name "*.ckpt" -o -name "*.pt" -o -name "*.pth" -o -name "*.bin" \) -exec ln -sf "$2/" \;
 }
 link_files "$POOL/diffusion_models" "$POOL/sd"
 link_files "$POOL/checkpoints"      "$POOL/sd"
